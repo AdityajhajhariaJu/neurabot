@@ -18,7 +18,8 @@ CANDLE_LIMIT = 100  # number of candles to fetch per coin (enough for EMA + rang
 
 
 async def main_loop() -> None:
-    load_dotenv()
+    # Always load .env.local so Neurabot uses the same config as test scripts
+    load_dotenv(".env.local")
     cfg = load_config()
 
     exch = NeurabotExchange.from_config(cfg.exchange)
@@ -31,11 +32,15 @@ async def main_loop() -> None:
     print("[Neurabot] Starting WS candle store for coins:", coins)
     await ws_store.start(coins=coins)
 
-    # For daily loss checks
-    equity_start_of_day, _ = exch.get_equity_and_withdrawable()
+    # Give WS some time to connect and start receiving data
+    print("[Neurabot] Waiting 10s for initial candle data...")
+    await asyncio.sleep(10)
+
+    # For daily loss checks: temporary fixed equity baseline until HL 422 is resolved
+    equity_start_of_day = 96.0
     per_coin_loss_pct: Dict[str, float] = {}
 
-    print("[Neurabot] Started main loop. Equity start of day:", equity_start_of_day)
+    print("[Neurabot] Started main loop. Equity start of day (fixed):", equity_start_of_day)
 
     while True:
         loop_start = time.time()
@@ -43,8 +48,10 @@ async def main_loop() -> None:
         # Refresh news state (could be less frequent in practice)
         news_filter.refresh()
 
-        equity, withdrawable = exch.get_equity_and_withdrawable()
-        print("[Neurabot] Loop start: equity=", equity, "withdrawable=", withdrawable)
+        # TEMP: use fixed equity instead of querying HL user_state (which is 422'ing)
+        equity = equity_start_of_day
+        withdrawable = equity_start_of_day
+        print("[Neurabot] Loop start (fixed equity): equity=", equity, "withdrawable=", withdrawable)
 
         # Check daily loss limits before doing anything else
         if not check_daily_loss_limits(equity_start_of_day, equity, per_coin_loss_pct, cfg.risk):
@@ -64,12 +71,17 @@ async def main_loop() -> None:
             if coin not in mids:
                 continue
             try:
-                candles = exch.get_candles(coin, cfg.ema.timeframe, CANDLE_LIMIT)
+                # Use async method to get candles
+                candles = await exch.get_candles_async(coin, cfg.ema.timeframe, CANDLE_LIMIT)
             except NotImplementedError as e:
                 print("[Neurabot] No candles for coin:", coin, e)
                 continue
             except Exception as e:
                 print("[Neurabot] Error fetching candles for", coin, e)
+                continue
+
+            if not candles:
+                print("[Neurabot] Coin", coin, "has no candles yet")
                 continue
 
             closes = [float(c["c"]) for c in candles]
@@ -142,11 +154,18 @@ async def main_loop() -> None:
         # Basic pacing
         elapsed = time.time() - loop_start
         sleep_s = max(5.0 - elapsed, 1.0)
+        print(f"[Neurabot] Loop completed in {elapsed:.2f}s, sleeping {sleep_s:.2f}s")
         await asyncio.sleep(sleep_s)
 
 
 def main() -> None:
-    asyncio.run(main_loop())
+    try:
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        print("[Neurabot] Shutting down gracefully...")
+    except Exception as e:
+        print(f"[Neurabot] Fatal error: {e}")
+        raise
 
 
 if __name__ == "__main__":

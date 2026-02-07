@@ -39,13 +39,15 @@ If Hyperliquid changes this schema, _handle_msg will need updates.
 
 import asyncio
 import json
-import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, Dict, List
+from typing import Any, Deque, Dict, List, Optional
 
-import websockets
-
+try:
+    import websockets
+except ImportError:
+    print("[WS_CANDLES] WARNING: websockets library not installed. Install with: pip install websockets")
+    websockets = None
 
 # Hyperliquid WS endpoint (trades)
 HYPERLIQUID_WS_URL = "wss://api.hyperliquid.xyz/ws"
@@ -97,6 +99,8 @@ class WsCandleStore:
         self._histories: Dict[str, CandleHistory] = {}
         self._lock = asyncio.Lock()
         self._running = False
+        self._ws_task: Optional[asyncio.Task] = None
+        self._subscribed_coins: List[str] = []
 
     async def _ensure_history(self, coin: str) -> CandleHistory:
         if coin not in self._histories:
@@ -107,15 +111,12 @@ class WsCandleStore:
         return self._histories[coin]
 
     async def _handle_msg(self, msg: Dict[str, Any]) -> None:
-        """Handle a single WS message.
-
-        Expects trade messages with `channel == "trades"` and `data` as a list
-        of trade objects as described in the module docstring.
-        """
+        """Handle a single WS message."""
         channel = msg.get("channel")
 
         # Ignore subscription acks or unrelated channels
         if channel == "subscriptionResponse":
+            print("[WS_CANDLES] Subscription confirmed:", msg.get("data", {}).get("method"))
             return
         if channel != "trades":
             return
@@ -125,6 +126,7 @@ class WsCandleStore:
             return
 
         async with self._lock:
+            trades_processed = 0
             for trade in data:
                 try:
                     coin = trade.get("coin")
@@ -136,19 +138,29 @@ class WsCandleStore:
                     ts_ms = int(ts)
                     hist = await self._ensure_history(coin)
                     hist.add_trade(ts_ms, price)
-                except Exception:
-                    # Ignore malformed trades
+                    trades_processed += 1
+                except Exception as e:
+                    print(f"[WS_CANDLES] Error processing trade: {e}")
                     continue
+            if trades_processed > 0:
+                print(f"[WS_CANDLES] Processed {trades_processed} trades")
 
     async def _ws_loop(self, coins: List[str]) -> None:
         """Background WS loop that subscribes to trades and updates candles.
 
-        Always handles reconnects with a short backoff when the connection drops
+        Handles reconnects with exponential backoff when the connection drops
         or on any exception.
         """
+        if websockets is None:
+            print("[WS_CANDLES] ERROR: websockets library not available")
+            return
+
+        reconnect_count = 0
         while self._running:
             try:
+                print(f"[WS_CANDLES] Connecting to {HYPERLIQUID_WS_URL}...")
                 async with websockets.connect(HYPERLIQUID_WS_URL) as ws:
+                    print(f"[WS_CANDLES] Connected! Subscribing to {len(coins)} coins...")
                     # Subscribe to trades for each requested coin
                     for c in coins:
                         sub_msg = {
@@ -156,26 +168,45 @@ class WsCandleStore:
                             "subscription": {"type": "trades", "coin": c},
                         }
                         await ws.send(json.dumps(sub_msg))
+                        print(f"[WS_CANDLES] Subscribed to {c}")
+
+                    reconnect_count = 0  # reset on successful connection
+                    print("[WS_CANDLES] All subscriptions sent, listening for trades...")
 
                     async for raw in ws:
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
+                            print("[WS_CANDLES] Invalid JSON received")
                             continue
                         await self._handle_msg(msg)
-            except Exception:
-                # On any error, wait a bit and reconnect
-                await asyncio.sleep(5)
+            except Exception as e:
+                reconnect_count += 1
+                backoff = min(5 * reconnect_count, 60)  # Max 60s backoff
+                print(f"[WS_CANDLES] Error (reconnect #{reconnect_count}): {e}")
+                print(f"[WS_CANDLES] Reconnecting in {backoff}s...")
+                await asyncio.sleep(backoff)
 
     async def start(self, coins: List[str]) -> None:
         if self._running:
+            print("[WS_CANDLES] Already running")
             return
         self._running = True
+        self._subscribed_coins = coins
         # Fire-and-forget WS loop; it will maintain candles in the background
-        asyncio.create_task(self._ws_loop(coins=coins))
+        self._ws_task = asyncio.create_task(self._ws_loop(coins=coins))
+        print(f"[WS_CANDLES] Started background task for {len(coins)} coins")
 
     async def stop(self) -> None:
+        print("[WS_CANDLES] Stopping...")
         self._running = False
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+        print("[WS_CANDLES] Stopped")
 
     async def get_candles(self, coin: str, limit: int) -> List[Dict[str, Any]]:
         async with self._lock:
@@ -183,3 +214,8 @@ class WsCandleStore:
             if not hist:
                 return []
             return hist.get_last(limit)
+
+    async def get_candle_counts(self) -> Dict[str, int]:
+        """Get number of candles available for each coin (for debugging)."""
+        async with self._lock:
+            return {coin: len(hist.candles) for coin, hist in self._histories.items()}
