@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
 
-from ..config import EmaConfig, BreakoutConfig
+from config import EmaConfig, BreakoutConfig
 
 
 class Direction(Enum):

@@ -6,7 +6,7 @@ from typing import Dict, List
 
 import requests
 
-from ..config import NewsConfig
+from config import NewsConfig
 
 
 @dataclass

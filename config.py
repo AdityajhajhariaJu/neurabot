@@ -24,14 +24,14 @@ class EmaConfig:
 class BreakoutConfig:
     btc_eth_buffer_min: float  # 0.001 = 0.1%
     btc_eth_buffer_max: float  # 0.002 = 0.2%
-    alt_buffer_min: float      # 0.002 = 0.2%
-    alt_buffer_max: float      # 0.004 = 0.4%
+    alt_buffer_min: float  # 0.002 = 0.2%
+    alt_buffer_max: float  # 0.004 = 0.4%
 
 
 @dataclass
 class RiskConfig:
-    max_leverage: float        # 15x
-    max_positions: int         # 8
+    max_leverage: float  # 15x
+    max_positions: int  # 8
     risk_per_trade_pct: float  # e.g. 0.01 = 1% of equity
     daily_max_loss_pct: float  # e.g. 0.05 = 5% of equity per day
     per_coin_max_loss_pct: float  # e.g. 0.03 = 3% per coin per day
@@ -40,7 +40,7 @@ class RiskConfig:
 @dataclass
 class NewsConfig:
     rss_feeds: List[str]
-    block_keywords: List[str]   # headlines that block trading or reduce size
+    block_keywords: List[str]  # headlines that block trading or reduce size
     cool_off_minutes: int
 
 
@@ -78,12 +78,35 @@ def env_int(key: str, default: int) -> int:
 
 
 def load_config() -> NeurabotConfig:
-    # Exchange config (from your existing .env)
-    exchange = ExchangeConfig(
-        base_url=env_str("HL_BASE_URL", "https://api.hyperliquid.xyz"),
-        private_key=env_str("HL_PRIVATE_KEY", ""),
-        wallet_address=env_str("HL_WALLET_ADDRESS", ""),
+    # ── Exchange config ──
+    # Support both HL_* and NEURABOT_* env var names for flexibility.
+    # Priority: NEURABOT_* > HL_* > default
+    base_url = (
+        os.environ.get("NEURABOT_HL_BASE_URL")
+        or os.environ.get("HL_BASE_URL")
+        or "https://api.hyperliquid.xyz"
     )
+    private_key = (
+        os.environ.get("NEURABOT_PRIVATE_KEY")
+        or os.environ.get("HL_PRIVATE_KEY")
+        or ""
+    )
+    wallet_address = (
+        os.environ.get("NEURABOT_WALLET_ADDRESS")
+        or os.environ.get("HL_WALLET_ADDRESS")
+        or ""
+    )
+
+    exchange = ExchangeConfig(
+        base_url=base_url,
+        private_key=private_key,
+        wallet_address=wallet_address,
+    )
+
+    # Log what we resolved (never log the private key)
+    print(f"[Neurabot][Config] base_url={exchange.base_url}")
+    print(f"[Neurabot][Config] wallet_address={exchange.wallet_address or '(EMPTY!)'}")
+    print(f"[Neurabot][Config] private_key={'set' if exchange.private_key else '(EMPTY!)'}")
 
     # EMA config (your choices)
     ema = EmaConfig(
@@ -97,20 +120,20 @@ def load_config() -> NeurabotConfig:
     breakout = BreakoutConfig(
         btc_eth_buffer_min=0.001,  # 0.1%
         btc_eth_buffer_max=0.002,  # 0.2%
-        alt_buffer_min=0.002,      # 0.2%
-        alt_buffer_max=0.004,      # 0.4%,
+        alt_buffer_min=0.002,  # 0.2%
+        alt_buffer_max=0.004,  # 0.4%,
     )
 
-    # Risk config (reasonable starting values – can tune later)
+    # Risk config
     risk = RiskConfig(
         max_leverage=env_float("NEURABOT_MAX_LEVERAGE", 15.0),
         max_positions=env_int("NEURABOT_MAX_POSITIONS", 8),
-        risk_per_trade_pct=env_float("NEURABOT_RISK_PER_TRADE_PCT", 0.01),  # 1%
-        daily_max_loss_pct=env_float("NEURABOT_DAILY_MAX_LOSS_PCT", 0.05),   # 5%
-        per_coin_max_loss_pct=env_float("NEURABOT_PER_COIN_MAX_LOSS_PCT", 0.03),  # 3%
+        risk_per_trade_pct=env_float("NEURABOT_RISK_PER_TRADE_PCT", 0.01),
+        daily_max_loss_pct=env_float("NEURABOT_DAILY_MAX_LOSS_PCT", 0.05),
+        per_coin_max_loss_pct=env_float("NEURABOT_PER_COIN_MAX_LOSS_PCT", 0.03),
     )
 
-    # News config – simple defaults for now
+    # News config
     news = NewsConfig(
         rss_feeds=[
             "https://www.coindesk.com/arc/outboundfeeds/rss/",

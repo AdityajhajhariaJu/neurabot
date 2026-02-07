@@ -6,11 +6,12 @@ from typing import Dict, List
 
 from dotenv import load_dotenv
 
-from .config import load_config
-from .exchange import NeurabotExchange, get_ws_store
-from .strategy.ema_breakout import generate_signals_for_universe
-from .risk.position_sizing import compute_position_size, check_daily_loss_limits
-from .news.filter import NewsFilter
+# Use absolute imports so we match the tested config/exchange modules
+from config import load_config
+from exchange import NeurabotExchange, get_ws_store
+from strategy.ema_breakout import generate_signals_for_universe
+from risk.position_sizing import compute_position_size, check_daily_loss_limits
+from news.filter import NewsFilter
 
 
 TOP_N_COINS = 20
@@ -18,12 +19,26 @@ CANDLE_LIMIT = 100  # number of candles to fetch per coin (enough for EMA + rang
 
 
 async def main_loop() -> None:
-    # Always load .env.local so Neurabot uses the same config as test scripts
+    """Main Neurabot loop.
+
+    Always load .env.local explicitly so config sees NEURABOT_* / HL_* vars.
+    """
     load_dotenv(".env.local")
     cfg = load_config()
 
     exch = NeurabotExchange.from_config(cfg.exchange)
     news_filter = NewsFilter(cfg.news)
+
+    # ── Fetch real starting equity ──
+    print("[Neurabot] Fetching initial equity from Hyperliquid...")
+    try:
+        equity_start_of_day, _ = exch.get_equity_and_withdrawable()
+        print(f"[Neurabot] Real equity at start: {equity_start_of_day}")
+    except Exception as e:
+        print(f"[Neurabot] WARNING: Could not fetch equity ({e}), defaulting to 96.0")
+        equity_start_of_day = 96.0
+
+    per_coin_loss_pct: Dict[str, float] = {}
 
     # Start websocket candle store (15m candles) for top N coins
     ws_store = get_ws_store()
@@ -36,22 +51,26 @@ async def main_loop() -> None:
     print("[Neurabot] Waiting 10s for initial candle data...")
     await asyncio.sleep(10)
 
-    # For daily loss checks: temporary fixed equity baseline until HL 422 is resolved
-    equity_start_of_day = 96.0
-    per_coin_loss_pct: Dict[str, float] = {}
-
-    print("[Neurabot] Started main loop. Equity start of day (fixed):", equity_start_of_day)
+    print(f"[Neurabot] Started main loop. Equity start of day: {equity_start_of_day}")
 
     while True:
         loop_start = time.time()
 
-        # Refresh news state (could be less frequent in practice)
-        news_filter.refresh()
+        # Refresh news state
+        try:
+            news_filter.refresh()
+        except Exception as e:
+            print(f"[Neurabot] News refresh error (non-fatal): {e}")
 
-        # TEMP: use fixed equity instead of querying HL user_state (which is 422'ing)
-        equity = equity_start_of_day
-        withdrawable = equity_start_of_day
-        print("[Neurabot] Loop start (fixed equity): equity=", equity, "withdrawable=", withdrawable)
+        # ── Fetch real equity ──
+        try:
+            equity, withdrawable = exch.get_equity_and_withdrawable()
+        except Exception as e:
+            print(f"[Neurabot] Equity fetch failed ({e}), using last known: {equity_start_of_day}")
+            equity = equity_start_of_day
+            withdrawable = equity_start_of_day
+
+        print(f"[Neurabot] Loop start: equity={equity}, withdrawable={withdrawable}")
 
         # Check daily loss limits before doing anything else
         if not check_daily_loss_limits(equity_start_of_day, equity, per_coin_loss_pct, cfg.risk):
@@ -59,10 +78,21 @@ async def main_loop() -> None:
             await asyncio.sleep(60)
             continue
 
-        # Get top N coins from universe (may change over time)
+        # Get top N coins from universe
         universe = exch.get_top_n_universe(TOP_N_COINS)
         mids = exch.get_mids()
-        print("[Neurabot] Universe size:", len(universe), "mids:", len(mids))
+        print(f"[Neurabot] Universe size: {len(universe)}, mids: {len(mids)}")
+
+        # ── Fetch real open positions ──
+        try:
+            open_positions = exch.get_open_positions()
+            open_positions_count = len(open_positions)
+        except Exception as e:
+            print(f"[Neurabot] Open positions fetch failed ({e}), assuming 0")
+            open_positions = []
+            open_positions_count = 0
+
+        print(f"[Neurabot] Open positions: {open_positions_count}")
 
         closes_by_coin: Dict[str, List[float]] = {}
 
@@ -71,21 +101,22 @@ async def main_loop() -> None:
             if coin not in mids:
                 continue
             try:
-                # Use async method to get candles
                 candles = await exch.get_candles_async(coin, cfg.ema.timeframe, CANDLE_LIMIT)
             except NotImplementedError as e:
-                print("[Neurabot] No candles for coin:", coin, e)
+                print(f"[Neurabot] No candles for coin: {coin} ({e})")
                 continue
             except Exception as e:
-                print("[Neurabot] Error fetching candles for", coin, e)
+                print(f"[Neurabot] Error fetching candles for {coin}: {e}")
                 continue
 
             if not candles:
-                print("[Neurabot] Coin", coin, "has no candles yet")
                 continue
 
             closes = [float(c["c"]) for c in candles]
-            print("[Neurabot] Coin", coin, "candles=", len(candles), "closes=", len(closes))
+            if len(closes) >= cfg.ema.slow_period:
+                # Only log coins with enough data for signals
+                print(f"[Neurabot] Coin {coin} candles={len(candles)}")
+
             if not closes:
                 continue
             closes_by_coin[coin] = closes
@@ -97,17 +128,13 @@ async def main_loop() -> None:
 
         # Generate EMA + breakout signals
         signals = generate_signals_for_universe(closes_by_coin, cfg.ema, cfg.breakout)
-        print("[Neurabot] Signals generated:", list(signals.keys()))
-
-        # Get current open positions count
-        open_positions = exch.get_open_positions()
-        open_positions_count = len(open_positions)
-        print("[Neurabot] Open positions:", open_positions_count)
+        if signals:
+            print(f"[Neurabot] Signals generated: {list(signals.keys())}")
 
         for coin, sig in signals.items():
             # Skip if news filter blocks trading
             if news_filter.is_blocked(coin):
-                print("[Neurabot] Coin blocked by news:", coin)
+                print(f"[Neurabot] Coin blocked by news: {coin}")
                 continue
 
             # Compute position size based on risk
@@ -120,13 +147,11 @@ async def main_loop() -> None:
                 cfg=cfg.risk,
             )
             if pos_size is None or pos_size.size <= 0:
-                print("[Neurabot] Position size invalid for", coin)
+                print(f"[Neurabot] Position size invalid for {coin}")
                 continue
 
-            # Place order live (no dry-run here)
+            # Place order
             is_buy = sig.direction.name == "LONG"
-
-            # Simple limit price around entry (tiny slippage allowance)
             limit_px = sig.entry_price * (1.001 if is_buy else 0.999)
 
             try:
@@ -139,17 +164,12 @@ async def main_loop() -> None:
                     reduce_only=False,
                 )
                 print(
-                    "[Neurabot] ORDER",
-                    coin,
-                    "side=",
-                    "BUY" if is_buy else "SELL",
-                    "size=",
-                    pos_size.size,
-                    "res=",
-                    res,
+                    f"[Neurabot] ORDER {coin} side={'BUY' if is_buy else 'SELL'} "
+                    f"size={pos_size.size} entry={sig.entry_price:.4f} "
+                    f"sl={sig.stop_loss:.4f} tp={sig.take_profit:.4f} res={res}"
                 )
             except Exception as e:
-                print("[Neurabot] ORDER_ERROR", coin, e)
+                print(f"[Neurabot] ORDER_ERROR {coin}: {e}")
 
         # Basic pacing
         elapsed = time.time() - loop_start

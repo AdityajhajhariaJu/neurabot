@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict
 
-from ..config import RiskConfig
+from config import RiskConfig
 
 
 @dataclass
