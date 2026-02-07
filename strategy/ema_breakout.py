@@ -24,125 +24,88 @@ class Signal:
     reason: str
 
 
-def _ema(prices: List[float], period: int) -> float:
-    if not prices:
+def _sma(prices: List[float], period: int) -> float:
+    if len(prices) < period:
         return 0.0
-    k = 2.0 / (period + 1)
-    ema_val = prices[0]
-    for px in prices[1:]:
-        ema_val = (px * k) + (ema_val * (1 - k))
-    return ema_val
+    return sum(prices[-period:]) / float(period)
 
 
-def compute_emas(closes: List[float], cfg: EmaConfig) -> Tuple[float, float]:
-    """Compute EMA_fast and EMA_slow from a list of closing prices.
-
-    Assumes `closes` are ordered oldest -> newest.
-    """
-    if len(closes) < cfg.slow_period:
-        return 0.0, 0.0
-    ema_fast = _ema(closes[-cfg.fast_period :], cfg.fast_period)
-    ema_slow = _ema(closes[-cfg.slow_period :], cfg.slow_period)
-    return ema_fast, ema_slow
+def _std(prices: List[float], period: int) -> float:
+    if len(prices) < period:
+        return 0.0
+    window = prices[-period:]
+    mean = sum(window) / float(period)
+    var = sum((p - mean) ** 2 for p in window) / float(period)
+    return math.sqrt(var)
 
 
-def _range_high_low(closes: List[float], lookback: int) -> Tuple[float, float]:
-    window = closes[-lookback:] if len(closes) >= lookback else closes
+def _atr_proxy(closes: List[float], lookback: int) -> float:
+    if len(closes) < 2:
+        return 0.0
+    diffs = [abs(closes[i] - closes[i - 1]) for i in range(1, len(closes))]
+    window = diffs[-lookback:] if len(diffs) >= lookback else diffs
     if not window:
-        return 0.0, 0.0
-    return max(window), min(window)
-
-
-def _buffer_for_coin(coin: str, price: float, cfg: BreakoutConfig) -> Tuple[float, float]:
-    """Return (min_buffer, max_buffer) in absolute price units for a coin.
-
-    BTC/ETH: use btc_eth_* buffers, else alt_* buffers.
-    """
-    is_btc_or_eth = coin.upper() in {"BTC", "ETH"}
-    if is_btc_or_eth:
-        return price * cfg.btc_eth_buffer_min, price * cfg.btc_eth_buffer_max
-    return price * cfg.alt_buffer_min, price * cfg.alt_buffer_max
+        return 0.0
+    return sum(window) / float(len(window))
 
 
 def generate_signal_for_coin(
     coin: str,
     closes: List[float],
     cfg_ema: EmaConfig,
-    cfg_breakout: BreakoutConfig,
+    cfg_breakout: BreakoutConfig,  # unused, kept for signature compatibility
     atr: Optional[float] = None,
 ) -> Optional[Signal]:
-    # DEBUG_EMA: logging helper for scalper debug
-    # (keep prints lightweight, only when we have enough data)
-    """Generate EMA+breakout signal for a single coin.
+    """Generate a simple Bollinger mean-reversion signal for a single coin.
 
-    - Uses EMA(20/50) on 15m (from cfg_ema) to determine direction bias.
-    - Uses 24-candle range + buffer from cfg_breakout.
-    - Returns a Signal with entry/stop/take-profit, or None if no trade.
+    - Uses SMA20 +/- 2*Std20 as bands on 15m closes.
+    - Long when price closes below lower band (mean reversion up).
+    - Short when price closes above upper band (mean reversion down).
+    - Stop loss placed slightly outside the band; TP at the SMA (mean).
+
+    Assumes `closes` ordered oldest -> newest.
     """
-    if len(closes) < max(cfg_ema.slow_period, cfg_ema.lookback_candles):
+
+    # Require enough data for Bollinger bands
+    period = 20
+    if len(closes) < period:
         return None
 
-    ema_fast, ema_slow = compute_emas(closes, cfg_ema)
-    # DEBUG_EMA
-    # print(f'[Neurabot][EMA] {coin} closes={len(closes)} ema_fast={ema_fast:.4f} ema_slow={ema_slow:.4f}')
-    if ema_fast == 0.0 and ema_slow == 0.0:
+    sma = _sma(closes, period)
+    std = _std(closes, period)
+    if sma == 0.0 or std == 0.0:
         return None
 
-    # Direction bias from EMA (scalper mode: always pick a side when possible)
-    diff = ema_fast - ema_slow
-    threshold = 0.0002 * ema_slow if ema_slow != 0 else 0.0  # ~0.02%
-    if diff > threshold:
-        bias = Direction.LONG
-    elif diff < -threshold:
-        bias = Direction.SHORT
-    else:
-        # Flat EMAs: use last price vs EMA50 as bias
-        if closes[-1] > ema_slow:
-            bias = Direction.LONG
-        elif closes[-1] < ema_slow:
-            bias = Direction.SHORT
-        else:
-            return None
+    upper = sma + 2.0 * std
+    lower = sma - 2.0 * std
+    last = closes[-1]
 
-    range_high, range_low = _range_high_low(closes, cfg_ema.lookback_candles)
-    last_price = closes[-1]
-    # DEBUG_RANGE
-    # print(f'[Neurabot][RANGE] {coin} high={range_high:.4f} low={range_low:.4f} last={last_price:.4f}')
+    # Volatility filter: skip completely dead coins
+    atr_val = atr if atr is not None else _atr_proxy(closes, lookback=10)
+    if atr_val <= 0:
+        return None
+    if last <= 0:
+        return None
+    if atr_val / last <= 0.001:  # require at least 0.1% recent vol
+        return None
 
-    # Compute buffer in absolute price units
-    min_buf, max_buf = _buffer_for_coin(coin, last_price, cfg_breakout)
+    # LONG mean reversion: price below lower band
+    if last < lower:
+        entry = last
+        # Stop a bit below lower band
+        stop = lower - 0.5 * std
+        # Take profit at the mean
+        tp = sma
+        reason = "Bollinger mean-reversion LONG (close < lower band)"
+        return Signal(coin, Direction.LONG, entry, stop, tp, reason)
 
-    # Use the minimum buffer for more aggressive trading
-    buf = min_buf
-
-    # Basic ATR proxy if none provided: average abs change over last N candles
-    if atr is None:
-        diffs = [abs(closes[i] - closes[i - 1]) for i in range(1, len(closes))]
-        atr = sum(diffs[-cfg_ema.lookback_candles :]) / max(1, min(len(diffs), cfg_ema.lookback_candles))
-
-    # Entry / SL / TP based on direction and breakout
-    reason = ""
-    if bias is Direction.LONG:
-        breakout_level = range_high + buf
-        if last_price > breakout_level:
-            entry = last_price
-            # Stop below range low by 0.5 * ATR
-            stop = range_low - 0.5 * atr
-            # Take profit at 2R from entry
-            risk_per_unit = entry - stop
-            tp = entry + 2.0 * risk_per_unit
-            reason = "EMA20>50 + breakout above range"
-            return Signal(coin, Direction.LONG, entry, stop, tp, reason)
-    elif bias is Direction.SHORT:
-        breakout_level = range_low - buf
-        if last_price < breakout_level:
-            entry = last_price
-            # Stop above range high by 0.5 * ATR
-            stop = range_high + 0.5 * atr
-            risk_per_unit = stop - entry
-            tp = entry - 2.0 * risk_per_unit
-            reason = "EMA20<50 + breakout below range"
-            return Signal(coin, Direction.SHORT, entry, stop, tp, reason)
+    # SHORT mean reversion: price above upper band
+    if last > upper:
+        entry = last
+        stop = upper + 0.5 * std
+        tp = sma
+        reason = "Bollinger mean-reversion SHORT (close > upper band)"
+        return Signal(coin, Direction.SHORT, entry, stop, tp, reason)
 
     return None
 
@@ -152,7 +115,7 @@ def generate_signals_for_universe(
     cfg_ema: EmaConfig,
     cfg_breakout: BreakoutConfig,
 ) -> Dict[str, Signal]:
-    """Generate signals for multiple coins.
+    """Generate Bollinger mean-reversion signals for multiple coins.
 
     `closes_by_coin` maps coin symbol -> list of closes (oldest -> newest).
     Returns a dict of coin -> Signal for coins with valid trade setups.
