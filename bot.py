@@ -172,26 +172,14 @@ async def main_loop() -> None:
                 print(f"[Neurabot] Position size invalid for {coin}")
                 continue
 
-            # Place order (LIVE)
+            # DRY_RUN: log intended order instead of sending it
             is_buy = sig.direction.name == "LONG"
             limit_px = sig.entry_price * (1.001 if is_buy else 0.999)
-
-            try:
-                res = exch.place_order(
-                    coin=coin,
-                    is_buy=is_buy,
-                    size=pos_size.size,
-                    limit_px=limit_px,
-                    tif="Ioc",
-                    reduce_only=False,
-                )
-                print(
-                    f"[Neurabot] ORDER {coin} side={'BUY' if is_buy else 'SELL'} "
-                    f"size={pos_size.size} entry={sig.entry_price:.4f} "
-                    f"sl={sig.stop_loss:.4f} tp={sig.take_profit:.4f} res={res}"
-                )
-            except Exception as e:
-                print(f"[Neurabot] ORDER_ERROR {coin}: {e}")
+            print(
+                f"[Neurabot][DRY_RUN] WOULD ORDER {coin} side={'BUY' if is_buy else 'SELL'} "
+                f"size={pos_size.size} entry={sig.entry_price:.4f} "
+                f"sl={sig.stop_loss:.4f} tp={sig.take_profit:.4f} limit_px={limit_px:.4f}"
+            )
 
         # Basic pacing
         elapsed = time.time() - loop_start

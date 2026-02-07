@@ -76,8 +76,9 @@ def generate_signal_for_coin(
     if sma == 0.0 or std == 0.0:
         return None
 
-    upper = sma + 2.0 * std
-    lower = sma - 2.0 * std
+    # Slightly tighter bands to increase trade frequency
+    upper = sma + 1.5 * std
+    lower = sma - 1.5 * std
     last = closes[-1]
 
     # Volatility filter: skip completely dead coins
@@ -86,7 +87,8 @@ def generate_signal_for_coin(
         return None
     if last <= 0:
         return None
-    if atr_val / last <= 0.001:  # require at least 0.1% recent vol
+    # Require some recent volatility, but be fairly permissive
+    if atr_val / last <= 0.0003:  # ~0.03% recent vol
         return None
 
     # LONG mean reversion: price below lower band
