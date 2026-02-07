@@ -64,17 +64,5 @@ class NewsFilter:
             self._update_state_from_headlines(headlines)
 
     def is_blocked(self, coin: str) -> bool:
-        """Return True if trading should be blocked due to recent bad news."""
-        now = time.time()
-        cooloff = self.cfg.cool_off_minutes * 60
-
-        # Global block
-        if self.global_state.last_block_ts and now - self.global_state.last_block_ts < cooloff:
-            return True
-
-        # Per-coin block (not implemented yet, placeholder for future)
-        state = self.per_coin_state.get(coin)
-        if state and now - state.last_block_ts < cooloff:
-            return True
-
+        """Scalper mode: do not block trading based on news."""
         return False

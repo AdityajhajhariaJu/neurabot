@@ -29,6 +29,28 @@ async def main_loop() -> None:
     exch = NeurabotExchange.from_config(cfg.exchange)
     news_filter = NewsFilter(cfg.news)
 
+    # ── Historical backfill: seed candles before starting WS ──
+    from data.http_candles import fetch_candles
+    ws_store = get_ws_store()
+
+    universe = exch.get_top_n_universe(TOP_N_COINS)
+    coins = [asset["name"] for asset in universe]
+    print("[Neurabot] Backfilling 15m candles for coins:", coins)
+
+    for coin in coins:
+        try:
+            hist = fetch_candles(
+                cfg.exchange.base_url,
+                coin,
+                interval=cfg.ema.timeframe,
+                limit=CANDLE_LIMIT,
+            )
+            print(f"[Neurabot] Backfill {coin}: fetched {len(hist)} candles")
+            # Seed historical candles into the store
+            await ws_store.seed_candles(coin, hist)
+        except Exception as e:
+            print(f"[Neurabot] Backfill error for {coin}: {e}")
+
     # ── Fetch real starting equity ──
     print("[Neurabot] Fetching initial equity from Hyperliquid...")
     try:
@@ -150,7 +172,7 @@ async def main_loop() -> None:
                 print(f"[Neurabot] Position size invalid for {coin}")
                 continue
 
-            # Place order
+            # Place order (LIVE)
             is_buy = sig.direction.name == "LONG"
             limit_px = sig.entry_price * (1.001 if is_buy else 0.999)
 

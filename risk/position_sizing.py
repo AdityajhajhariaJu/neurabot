@@ -41,6 +41,8 @@ def compute_position_size(
     risk_amount = cfg.risk_per_trade_pct * equity
     if risk_amount <= 0:
         return None
+    # DEBUG_SIZE
+    # print(f'[Neurabot][SIZE] {coin} equity={equity:.2f} risk_amount={risk_amount:.4f}')
 
     risk_per_unit = abs(entry_price - stop_loss)
     if risk_per_unit <= 0:
@@ -52,6 +54,14 @@ def compute_position_size(
         return None
 
     notional = size * entry_price
+
+    # Enforce max leverage cap: notional <= max_leverage * equity
+    max_notional = cfg.max_leverage * equity
+    if notional > max_notional:
+        notional = max_notional
+        size = notional / entry_price
+        if size <= 0:
+            return None
 
     # Direction string for logging / order side decision
     direction = "long" if entry_price > stop_loss else "short"

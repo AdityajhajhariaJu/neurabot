@@ -71,6 +71,8 @@ def generate_signal_for_coin(
     cfg_breakout: BreakoutConfig,
     atr: Optional[float] = None,
 ) -> Optional[Signal]:
+    # DEBUG_EMA: logging helper for scalper debug
+    # (keep prints lightweight, only when we have enough data)
     """Generate EMA+breakout signal for a single coin.
 
     - Uses EMA(20/50) on 15m (from cfg_ema) to determine direction bias.
@@ -81,25 +83,37 @@ def generate_signal_for_coin(
         return None
 
     ema_fast, ema_slow = compute_emas(closes, cfg_ema)
+    # DEBUG_EMA
+    # print(f'[Neurabot][EMA] {coin} closes={len(closes)} ema_fast={ema_fast:.4f} ema_slow={ema_slow:.4f}')
     if ema_fast == 0.0 and ema_slow == 0.0:
         return None
 
-    # Direction bias from EMA
-    if ema_fast > ema_slow:
+    # Direction bias from EMA (scalper mode: always pick a side when possible)
+    diff = ema_fast - ema_slow
+    threshold = 0.0002 * ema_slow if ema_slow != 0 else 0.0  # ~0.02%
+    if diff > threshold:
         bias = Direction.LONG
-    elif ema_fast < ema_slow:
+    elif diff < -threshold:
         bias = Direction.SHORT
     else:
-        return None  # flat / chop, skip
+        # Flat EMAs: use last price vs EMA50 as bias
+        if closes[-1] > ema_slow:
+            bias = Direction.LONG
+        elif closes[-1] < ema_slow:
+            bias = Direction.SHORT
+        else:
+            return None
 
     range_high, range_low = _range_high_low(closes, cfg_ema.lookback_candles)
     last_price = closes[-1]
+    # DEBUG_RANGE
+    # print(f'[Neurabot][RANGE] {coin} high={range_high:.4f} low={range_low:.4f} last={last_price:.4f}')
 
     # Compute buffer in absolute price units
     min_buf, max_buf = _buffer_for_coin(coin, last_price, cfg_breakout)
 
-    # We can use the mid of the buffer range for now
-    buf = (min_buf + max_buf) / 2.0
+    # Use the minimum buffer for more aggressive trading
+    buf = min_buf
 
     # Basic ATR proxy if none provided: average abs change over last N candles
     if atr is None:

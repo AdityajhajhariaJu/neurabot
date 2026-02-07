@@ -113,15 +113,15 @@ def load_config() -> NeurabotConfig:
         timeframe="15m",
         fast_period=20,
         slow_period=50,
-        lookback_candles=24,
+        lookback_candles=4,   # scalper mode: last 4 candles
     )
 
     # Breakout buffers (your choices)
     breakout = BreakoutConfig(
-        btc_eth_buffer_min=0.001,  # 0.1%
-        btc_eth_buffer_max=0.002,  # 0.2%
-        alt_buffer_min=0.002,  # 0.2%
-        alt_buffer_max=0.004,  # 0.4%,
+        btc_eth_buffer_min=0.0,     # 0–0.05% for BTC/ETH
+        btc_eth_buffer_max=0.0005,
+        alt_buffer_min=0.0005,      # 0.05–0.1% for alts
+        alt_buffer_max=0.001,
     )
 
     # Risk config

@@ -215,6 +215,27 @@ class WsCandleStore:
                 return []
             return hist.get_last(limit)
 
+    async def seed_candles(self, coin: str, candles: List[Dict[str, Any]]) -> None:
+        """Seed historical candles for a coin (for backfill).
+
+        Expects candles in [{"t","o","h","l","c"}, ...] format, oldest -> newest.
+        """
+        async with self._lock:
+            hist = await self._ensure_history(coin)
+            for c in candles:
+                try:
+                    hist.candles.append(
+                        Candle(
+                            t=int(c["t"]),
+                            o=float(c["o"]),
+                            h=float(c["h"]),
+                            l=float(c["l"]),
+                            c=float(c["c"]),
+                        )
+                    )
+                except Exception:
+                    continue
+
     async def get_candle_counts(self) -> Dict[str, int]:
         """Get number of candles available for each coin (for debugging)."""
         async with self._lock:
